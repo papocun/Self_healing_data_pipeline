@@ -2,6 +2,7 @@
 
 Run from repo root:  uvicorn api.main:app --port 8000
 """
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -367,6 +368,31 @@ def data_quality():
 def quarantine(kind: str = Query("invalid", pattern="^(invalid|duplicate|inference)$"),
                page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100)):
     return store.quarantine_page(kind, page, size)
+
+
+_LOG_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (\w+)\s+\| ([\w.:_]+) - (.*)$")
+_PATH_RE = re.compile(r"(?:[A-Za-z]:)?[\\/](?:[\w.\- ]+[\\/])+([\w.\-]+)")
+
+
+@app.get("/api/pipeline/logs")
+def pipeline_logs(limit: int = Query(40, ge=1, le=200), level: str = Query("ALL", pattern="^(ALL|INFO|WARNING|ERROR)$")):
+    """Most recent log lines, with filesystem paths reduced to file names."""
+    f = settings.paths.logs_dir / "pipeline.log"
+    if not f.exists():
+        return {"items": []}
+    with open(f, "rb") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - 256 * 1024))
+        lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    out = []
+    for line in reversed(lines):
+        m = _LOG_RE.match(line.strip())
+        if m and (level == "ALL" or m.group(2) == level):
+            out.append({"time": m.group(1), "level": m.group(2), "logger": m.group(3),
+                        "message": _PATH_RE.sub(r"\1", m.group(4))[:400]})
+            if len(out) >= limit:
+                break
+    return {"items": out}
 
 
 @app.get("/api/health")

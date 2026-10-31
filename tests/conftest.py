@@ -5,8 +5,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
-
 
 @pytest.fixture
 def sample_raw_dataframe() -> pd.DataFrame:

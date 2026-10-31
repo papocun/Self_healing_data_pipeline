@@ -1,4 +1,5 @@
 ﻿"use client";
+import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
@@ -45,6 +46,37 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
       <span className="text-muted">{k}</span>
       <span className="text-right">{children}</span>
     </div>
+  );
+}
+
+function Logs() {
+  const [level, setLevel] = useState("ALL");
+  const lg = useApi(() => api.logs(level), [level]);
+  return (
+    <Section
+      title="Recent logs"
+      action={
+        <select value={level} onChange={(e) => setLevel(e.target.value)} aria-label="Log level" className="rounded border border-border bg-surface px-2 py-1 text-xs">
+          {["ALL", "INFO", "WARNING", "ERROR"].map((l) => (
+            <option key={l}>{l}</option>
+          ))}
+        </select>
+      }
+    >
+      {!lg.data ? null : lg.data.items.length === 0 ? (
+        <Empty title="No log entries" />
+      ) : (
+        <ul className="max-h-72 space-y-1 overflow-auto font-mono text-xs">
+          {lg.data.items.map((l, i) => (
+            <li key={i} className="flex gap-3">
+              <span className="shrink-0 text-muted">{l.time}</span>
+              <span className={`w-14 shrink-0 ${l.level === "ERROR" ? "text-neg" : l.level === "WARNING" ? "text-warn" : "text-muted"}`}>{l.level}</span>
+              <span className="break-words">{l.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
   );
 }
 
@@ -146,6 +178,7 @@ export default function PipelinePage() {
                 )}
                 <p className="mt-3 text-xs text-muted">Inference latency is not recorded by the pipeline.</p>
               </Section>
+              <Logs />
             </>
           );
         }}
