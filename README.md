@@ -19,8 +19,6 @@ SelfHealingPipeline reads large sets of customer reviews, cleans them, and class
 
 ![SelfHealingPipeline architecture](docs/images/architecture.png)
 
-The interactive version is in [docs/architecture.html](docs/architecture.html).
-
 | Layer | Role |
 |---|---|
 | Ingestion | Detects the file format, streams JSON Lines and hands out batches |
@@ -59,15 +57,3 @@ Confidence is reported by the model itself and is not a calibrated probability.
 **Pipeline** – status, record flow through each stage, retry and recovery counts, Ollama health, recent batches and logs.
 
 ![Pipeline](docs/images/pipeline.png)
-
-## Technology stack
-
-| Responsibility | Technology |
-|---|---|
-| Language and processing | Python, pandas, NumPy, Pydantic |
-| AI inference | Ollama, Qwen 2.5 3B |
-| Orchestration | Apache Airflow |
-| Storage | Parquet (PyArrow), JSON checkpoints, PostgreSQL for Airflow metadata |
-| Backend API | FastAPI, Uvicorn |
-| Frontend | Next.js, TypeScript, Tailwind CSS, Recharts |
-| Containerization and testing | Docker Compose, pytest |
