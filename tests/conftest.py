@@ -1,8 +1,11 @@
 """Shared pytest fixtures for pipeline unit and integration tests."""
 
+import os
 from pathlib import Path
 import pandas as pd
 import pytest
+
+os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
 
 @pytest.fixture

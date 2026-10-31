@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f7f7f8;
+  --surface: #f7f7f8;
+  --border: #e5e7eb;
+  --ink: #1f2328;
+  --muted: #6b7280;
+  --pos: #2f9e6b;
+  --neg: #d1495b;
+  --neu: #7b8794;
+  --warn: #d9962b;
+  --accent: #3b6fd4;
+}
+[data-theme="dark"] {
+  --bg: #0f1114;
+  --surface: #0f1114;
+  --border: #2a2f37;
+  --ink: #e6e8eb;
+  --muted: #9aa3ae;
+  --pos: #4cc38a;
+  --neg: #ef6b7b;
+  --neu: #94a3b8;
+  --warn: #e5ab4a;
+  --accent: #6b95ec;
+}
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.recharts-text {
+  fill: var(--muted);
+  font-size: 12px;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--border);
+}

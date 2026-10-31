@@ -170,3 +170,120 @@ def test_batch_loader_from_file(tmp_path: Path):
     batches = list(loader.get_batches_from_file(test_file))
     assert len(batches) == 3
     assert batches[0].source_file == "data.csv"
+
+
+
+def test_detect_format(tmp_path: Path, reader: DataReader):
+    # 1. JSONL by extension
+    f1 = tmp_path / "test.jsonl"
+    f1.write_text('{"a": 1}\n', encoding="utf-8")
+    assert reader.detect_format(f1) == "jsonl"
+
+    f2 = tmp_path / "test.ndjson"
+    f2.write_text('{"a": 1}\n', encoding="utf-8")
+    assert reader.detect_format(f2) == "jsonl"
+
+    # 2. Standard JSON array
+    f3 = tmp_path / "array.json"
+    f3.write_text('[{"a": 1}, {"a": 2}]', encoding="utf-8")
+    assert reader.detect_format(f3) == "json"
+
+    # 3. Yelp-style JSONL with .json extension
+    f4 = tmp_path / "yelp_style.json"
+    f4.write_text('{"business_id": "b1", "name": "Store 1"}\n{"business_id": "b2", "name": "Store 2"}\n', encoding="utf-8")
+    assert reader.detect_format(f4) == "jsonl"
+
+
+def test_read_yelp_business_jsonl_multiline(tmp_path: Path, reader: DataReader):
+    # Simulates yelp_academic_dataset_business.json (newline-delimited JSON with .json extension)
+    business_file = tmp_path / "yelp_academic_dataset_business.json"
+    lines = [
+        json.dumps({"business_id": "b1", "name": "Bakery", "stars": 5.0}),
+        json.dumps({"business_id": "b2", "name": "Bistro", "stars": 3.5}),
+        json.dumps({"business_id": "b3", "name": "Cafe", "stars": 4.0}),
+    ]
+    business_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    df = reader.read_file(business_file)
+    assert len(df) == 3
+    assert list(df["business_id"]) == ["b1", "b2", "b3"]
+    assert df.iloc[0]["name"] == "Bakery"
+
+
+def test_streaming_jsonl_batches(tmp_path: Path):
+    jsonl_file = tmp_path / "reviews.json"
+    lines = [json.dumps({"id": i, "text": f"review {i}"}) for i in range(10)]
+    jsonl_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    loader = BatchLoader(batch_size=3)
+    batches = list(loader.get_batches_from_file(jsonl_file))
+
+    assert len(batches) == 4
+    assert batches[0].record_count == 3
+    assert (batches[0].start_row, batches[0].end_row) == (0, 3)
+    assert batches[1].record_count == 3
+    assert (batches[1].start_row, batches[1].end_row) == (3, 6)
+    assert batches[2].record_count == 3
+    assert (batches[2].start_row, batches[2].end_row) == (6, 9)
+    assert batches[3].record_count == 1
+    assert (batches[3].start_row, batches[3].end_row) == (9, 10)
+
+
+def test_streaming_jsonl_resume_from_checkpoint(tmp_path: Path):
+    jsonl_file = tmp_path / "stream_resume.jsonl"
+    lines = [json.dumps({"id": i}) for i in range(10)]
+    jsonl_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    loader = BatchLoader(batch_size=3)
+    # Resume from batch 3 (batches 1 & 2 skipped)
+    batches = list(loader.get_batches_from_file(jsonl_file, start_batch=3))
+
+    assert len(batches) == 2
+    assert batches[0].batch_id == 3
+    assert (batches[0].start_row, batches[0].end_row) == (6, 9)
+    assert batches[0].data.iloc[0]["id"] == 6
+
+    assert batches[1].batch_id == 4
+    assert (batches[1].start_row, batches[1].end_row) == (9, 10)
+    assert batches[1].data.iloc[0]["id"] == 9
+
+
+def test_streaming_jsonl_with_malformed_lines(tmp_path: Path):
+    jsonl_file = tmp_path / "with_bad_lines.json"
+    content = (
+        '{"id": 1, "text": "Valid 1"}\n'
+        'CORRUPT_NOT_JSON\n'
+        '{"id": 2, "text": "Valid 2"}\n'
+        '{truncated_json\n'
+        '{"id": 3, "text": "Valid 3"}\n'
+    )
+    jsonl_file.write_text(content, encoding="utf-8")
+
+    loader = BatchLoader(batch_size=2)
+    batches = list(loader.get_batches_from_file(jsonl_file))
+
+    # 3 valid records partitioned into batch of 2 and batch of 1
+    assert len(batches) == 2
+    assert batches[0].record_count == 2
+    assert batches[1].record_count == 1
+    all_ids = list(batches[0].data["id"]) + list(batches[1].data["id"])
+    assert all_ids == [1, 2, 3]
+
+
+def test_list_files_comma_separated_patterns(tmp_path: Path, reader: DataReader):
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+
+    (raw_dir / "yelp_academic_dataset_business.json").write_text('{"b": 1}\n', encoding="utf-8")
+    (raw_dir / "yelp_academic_dataset_review.json").write_text('{"r": 1}\n', encoding="utf-8")
+    (raw_dir / "yelp_sample.json").write_text('[{"s": 1}]', encoding="utf-8")
+    (raw_dir / "yelp_academic_dataset_user.json").write_text('{"u": 1}\n', encoding="utf-8")
+
+    # Match reviews and sample, exclude business and user
+    matched = reader.list_files(directory=raw_dir, pattern="*review*.*, *sample*.*")
+    matched_names = [f.name for f in matched]
+
+    assert "yelp_academic_dataset_review.json" in matched_names
+    assert "yelp_sample.json" in matched_names
+    assert "yelp_academic_dataset_business.json" not in matched_names
+    assert "yelp_academic_dataset_user.json" not in matched_names

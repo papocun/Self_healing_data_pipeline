@@ -38,7 +38,10 @@ class IngestionConfig(BaseModel):
         default_factory=lambda: int(os.getenv("MAX_FILE_SIZE_MB", "500")),
         ge=1,
     )
-    supported_extensions: Tuple[str, ...] = (".csv", ".json", ".jsonl", ".parquet")
+    raw_file_pattern: str = Field(
+        default_factory=lambda: os.getenv("RAW_FILE_PATTERN", "*review*.*, *sample*.*").strip()
+    )
+    supported_extensions: Tuple[str, ...] = (".csv", ".json", ".jsonl", ".ndjson", ".parquet")
     # utf-8-sig transparently strips BOM markers common in Excel/Windows exports
     default_encoding: str = "utf-8-sig"
     fallback_encodings: Tuple[str, ...] = ("utf-8", "latin1", "cp1252", "iso-8859-1")
@@ -46,7 +49,7 @@ class IngestionConfig(BaseModel):
 
 class OllamaConfig(BaseModel):
     base_url: str = Field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/"))
-    model: str = Field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3").strip())
+    model: str = Field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "qwen2.5:3b").strip())
     timeout_seconds: float = Field(
         default_factory=lambda: float(os.getenv("OLLAMA_TIMEOUT", "60.0")),
         gt=0.0,

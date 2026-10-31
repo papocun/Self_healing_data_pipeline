@@ -1,10 +1,10 @@
-"""Multi-format raw data ingestion with encoding fallback, size guards, and quarantine."""
+"""Multi-format raw data ingestion with format detection, streaming JSONL, and quarantine."""
 
-import json
-import shutil
 from datetime import datetime, timezone
+import json
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+import shutil
+from typing import Generator, List, Optional, Tuple, Union
 import pandas as pd
 
 from src.utils.config import settings
@@ -18,7 +18,7 @@ class DataReaderError(Exception):
 
 
 class UnsupportedFileFormatError(DataReaderError):
-    """File extension is not in the allowed ingestion formats."""
+    """File extension or format is not in the allowed ingestion formats."""
 
 
 class EmptyFileError(DataReaderError):
@@ -30,7 +30,7 @@ class FileSizeLimitExceededError(DataReaderError):
 
 
 class DataReader:
-    """Ingests tabular and semi-structured files (CSV, JSON, JSONL, Parquet) into DataFrames."""
+    """Ingests tabular and semi-structured files (CSV, JSON, JSONL, NDJSON, Parquet)."""
 
     def __init__(
         self,
@@ -47,28 +47,114 @@ class DataReader:
             max_file_size_mb or settings.ingestion.max_file_size_mb
         ) * 1024 * 1024
 
+    def detect_format(self, file_path: Union[str, Path]) -> str:
+        """Determines whether a file is 'csv', 'parquet', 'jsonl', or standard 'json'.
+
+        Inspects file extension and uses content sniffing on .json files to detect
+        newline-delimited JSON (JSONL/NDJSON) vs standard JSON documents.
+        """
+        path = Path(file_path).resolve()
+        suffix = path.suffix.lower()
+
+        if suffix in (".jsonl", ".ndjson"):
+            return "jsonl"
+        if suffix == ".csv":
+            return "csv"
+        if suffix == ".parquet":
+            return "parquet"
+        if suffix != ".json":
+            return suffix.lstrip(".")
+
+        # Content sniffing for .json files (e.g. Yelp datasets)
+        encodings = list(dict.fromkeys([self.default_encoding, *self.fallback_encodings]))
+        for enc in encodings:
+            try:
+                with open(path, "r", encoding=enc) as f:
+                    valid_json_objects = 0
+                    lines_inspected = 0
+                    for line in f:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        lines_inspected += 1
+
+                        # Multi-line array is standard JSON
+                        if stripped.startswith("[") and not stripped.endswith("]"):
+                            return "json"
+
+                        try:
+                            obj = json.loads(stripped)
+                            if isinstance(obj, dict):
+                                valid_json_objects += 1
+                                if valid_json_objects >= 2:
+                                    return "jsonl"
+                        except Exception:
+                            pass
+
+                        if lines_inspected >= 10:
+                            break
+
+                if valid_json_objects >= 2:
+                    return "jsonl"
+                return "json"
+            except (UnicodeDecodeError, OSError):
+                continue
+
+        return "json"
+
     def list_files(
         self,
         directory: Optional[Union[str, Path]] = None,
         pattern: str = "*",
     ) -> List[Path]:
-        target_dir = Path(directory) if directory else settings.paths.raw_data_dir
+        """Lists supported data files in a directory matching one or more comma-separated patterns."""
+        target_dir = (Path(directory) if directory else settings.paths.raw_data_dir).resolve()
         if not target_dir.exists():
             logger.warning("Ingestion directory does not exist: %s", target_dir)
             return []
 
-        matched = [
-            f for f in target_dir.glob(pattern)
-            if f.is_file() and f.suffix.lower() in self.supported_extensions
-        ]
-        matched.sort()
-        return matched
+        discovered_files = sorted(
+            [
+                f.name
+                for f in target_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in self.supported_extensions
+            ]
+        )
+
+        patterns = [p.strip() for p in pattern.split(",") if p.strip()]
+        matched_set = set()
+
+        for pat in patterns:
+            candidate_patterns = [pat]
+            if Path(pat).name != pat:
+                candidate_patterns.append(Path(pat).name)
+            for candidate_pat in candidate_patterns:
+                for f in target_dir.glob(candidate_pat):
+                    if f.is_file() and f.suffix.lower() in self.supported_extensions:
+                        matched_set.add(f.resolve())
+
+        matched_files = sorted(list(matched_set))
+        logger.info(
+            "Directory discovery in %s | Discovered files (%d): %s | Selected by pattern '%s' (%d): %s",
+            target_dir,
+            len(discovered_files),
+            discovered_files,
+            pattern,
+            len(matched_files),
+            [f.name for f in matched_files],
+        )
+        return matched_files
 
     def read_file(
         self,
         file_path: Union[str, Path],
         add_source_column: bool = False,
     ) -> pd.DataFrame:
+        """Reads a data file into memory as a DataFrame.
+
+        For files exceeding max_file_size_mb, raises FileSizeLimitExceededError.
+        Use stream_jsonl or BatchLoader.get_batches_from_file for streaming large datasets.
+        """
         path = Path(file_path).resolve()
 
         if not path.exists():
@@ -90,7 +176,8 @@ class DataReader:
         if file_size > self.max_file_size_bytes:
             raise FileSizeLimitExceededError(
                 f"File {path.name} ({file_size / (1024 * 1024):.1f} MB) exceeds "
-                f"limit of {self.max_file_size_bytes / (1024 * 1024):.1f} MB"
+                f"limit of {self.max_file_size_bytes / (1024 * 1024):.1f} MB. "
+                "Use streaming ingestion via BatchLoader to avoid OOM."
             )
 
         try:
@@ -103,7 +190,7 @@ class DataReader:
             logger.error("Failed to parse %s: %s", path.name, exc)
             raise DataReaderError(f"Corrupted or malformed file {path.name}: {exc}") from exc
 
-        # Drop completely blank rows (e.g., trailing commas in CSV exports)
+        # Drop completely blank rows
         df = df.dropna(how="all").reset_index(drop=True)
         if df.empty:
             raise EmptyFileError(f"File {path.name} contains no valid data rows")
@@ -115,6 +202,59 @@ class DataReader:
 
         logger.info("Ingested %d rows from %s", len(df), path.name)
         return df
+
+    def stream_jsonl(
+        self,
+        file_path: Union[str, Path],
+        batch_size: int = 1000,
+        add_source_column: bool = False,
+    ) -> Generator[pd.DataFrame, None, None]:
+        """Memory-efficient generator yielding DataFrames of size batch_size from a JSONL file."""
+        path = Path(file_path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Data file not found: {path}")
+        if path.stat().st_size == 0:
+            raise EmptyFileError(f"File is 0 bytes: {path}")
+
+        records: List[dict] = []
+        encodings = list(dict.fromkeys([self.default_encoding, *self.fallback_encodings]))
+
+        for enc in encodings:
+            try:
+                with open(path, "r", encoding=enc) as f:
+                    for line_num, line in enumerate(f, start=1):
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            item = json.loads(stripped)
+                            if isinstance(item, dict):
+                                records.append(item)
+                            elif isinstance(item, list):
+                                records.extend(item)
+                        except (json.JSONDecodeError, ValueError) as err:
+                            logger.warning("Malformed JSON on line %d in %s: %s", line_num, path.name, err)
+                            continue
+
+                        if len(records) >= batch_size:
+                            chunk_df = pd.DataFrame(records)
+                            chunk_df.columns = [str(c).strip() for c in chunk_df.columns]
+                            if add_source_column:
+                                chunk_df["_source_file"] = path.name
+                            yield chunk_df
+                            records.clear()
+
+                    if records:
+                        chunk_df = pd.DataFrame(records)
+                        chunk_df.columns = [str(c).strip() for c in chunk_df.columns]
+                        if add_source_column:
+                            chunk_df["_source_file"] = path.name
+                        yield chunk_df
+                        records.clear()
+
+                return
+            except UnicodeDecodeError:
+                continue
 
     def read_directory(
         self,
@@ -157,20 +297,41 @@ class DataReader:
             return None
 
     def _parse_by_format(self, path: Path, suffix: str) -> pd.DataFrame:
-        if suffix == ".csv":
+        fmt = self.detect_format(path)
+        if fmt == "csv":
             return self._read_with_encoding_fallback(path, lambda p, enc: pd.read_csv(p, encoding=enc))
-        if suffix == ".jsonl":
-            return self._read_with_encoding_fallback(
-                path, lambda p, enc: pd.read_json(p, lines=True, encoding=enc)
-            )
-        if suffix == ".json":
+        if fmt == "jsonl":
+            return self._read_with_encoding_fallback(path, self._parse_jsonl_file)
+        if fmt == "json":
             return self._read_with_encoding_fallback(path, self._parse_json_file)
-        if suffix == ".parquet":
+        if fmt == "parquet":
             return pd.read_parquet(path)
-        raise UnsupportedFileFormatError(f"Unhandled extension: {suffix}")
+        raise UnsupportedFileFormatError(f"Unhandled format: {fmt} ({suffix})")
+
+    def _parse_jsonl_file(self, path: Path, encoding: str) -> pd.DataFrame:
+        """Parses a JSONL / NDJSON file into a DataFrame, gracefully skipping malformed individual lines."""
+        records = []
+        with open(path, "r", encoding=encoding) as f:
+            for line_num, line in enumerate(f, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    data = json.loads(stripped)
+                    if isinstance(data, dict):
+                        records.append(data)
+                    elif isinstance(data, list):
+                        records.extend(data)
+                except (json.JSONDecodeError, ValueError) as err:
+                    logger.warning("Skipping malformed line %d in %s: %s", line_num, path.name, err)
+                    continue
+
+        if not records:
+            raise EmptyFileError(f"File {path.name} contains no valid JSONL records")
+
+        return pd.DataFrame(records)
 
     def _read_with_encoding_fallback(self, path: Path, reader_fn) -> pd.DataFrame:
-        # Deduplicate encoding sequence while preserving order
         encodings = list(dict.fromkeys([self.default_encoding, *self.fallback_encodings]))
         last_error: Optional[Exception] = None
 
