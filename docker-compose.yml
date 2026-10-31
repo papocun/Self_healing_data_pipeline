@@ -1,0 +1,56 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: self_healing_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: self_healing_pipeline
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3
+      - LOG_LEVEL=INFO
+      - BATCH_SIZE=32
+      - MAX_RETRIES=3
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+    command: ["python", "main.py"]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: self_healing_dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+volumes:
+  ollama_models:
+
